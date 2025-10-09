@@ -1,5 +1,5 @@
-" {
-  region = "eu-west-2" # London
+provider "aws" {
+  region = "us-east-1" 
 }
 
 resource "aws_iam_role" "lambda_exec_role" {
@@ -77,4 +77,3 @@ resource "aws_lambda_function" "confluence_lambda" {
     }
   }
 }
-
