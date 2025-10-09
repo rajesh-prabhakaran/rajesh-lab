@@ -72,6 +72,7 @@ resource "aws_lambda_function" "confluence_lambda" {
   environment {
     variables = {
       CONFLUENCE_SECRET_NAME = aws_secretsmanager_secret.confluence_secret.name
+      CONFLUENCE_SPACE_KEY   = var.confluence_space_key  
     }
   }
 }
