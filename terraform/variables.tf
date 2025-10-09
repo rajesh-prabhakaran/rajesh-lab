@@ -7,3 +7,8 @@ variable "s3_object_key" {
   description = "Key (path) to the Lambda ZIP file in the S3 bucket"
   type        = string
 }
+
+variable "confluence_space_key" {
+  description = "Key of Confluence space"
+  type        = string
+}
