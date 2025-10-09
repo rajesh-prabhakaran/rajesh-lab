@@ -1,7 +1,8 @@
 provider "aws" {
-  region = "us-east-1" 
+  region = "us-east-1"
 }
 
+# IAM Role for Lambda
 resource "aws_iam_role" "lambda_exec_role" {
   name = "confluence_lambda_exec_role"
 
@@ -44,6 +45,7 @@ resource "aws_iam_role_policy_attachment" "secrets_policy_attach" {
   policy_arn = aws_iam_policy.secrets_access.arn
 }
 
+# Secrets Manager
 resource "aws_secretsmanager_secret" "confluence_secret" {
   name = "confluence_api_credentials"
 }
@@ -57,19 +59,15 @@ resource "aws_secretsmanager_secret_version" "confluence_secret_version" {
   })
 }
 
-data "archive_file" "lambda_zip" {
-  type        = "zip"
-  source_dir  = "${path.module}/lambda"
-  output_path = "${path.module}/lambda.zip"
-}
-
+# Lambda Function from parameterized S3 bucket
 resource "aws_lambda_function" "confluence_lambda" {
   function_name = "confluence_page_analytics"
   role          = aws_iam_role.lambda_exec_role.arn
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.11"
-  filename      = data.archive_file.lambda_zip.output_path
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  s3_bucket = var.s3_bucket_name
+  s3_key    = var.s3_object_key
 
   environment {
     variables = {
