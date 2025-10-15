@@ -9,51 +9,56 @@ def get_confluence_credentials(secret_name):
     secret = client.get_secret_value(SecretId=secret_name)
     return json.loads(secret['SecretString'])
 
-def fetch_page_analytics(base_url, page_id, auth):
-    headers = {"Accept": "application/json"}
+def fetch_page_metadata(base_url, page_id, auth):
     url = f"{base_url}/wiki/rest/api/content/{page_id}?expand=version,metadata.labels,history"
+    headers = {"Accept": "application/json"}
     response = requests.get(url, headers=headers, auth=auth)
     if response.status_code != 200:
-        raise Exception(f"Error fetching page {page_id}: {response.text}")
-    page = response.json()
-    return {
-        'title': page.get('title'),
-        'id': page.get('id'),
-        'last_updated': page.get('version', {}).get('when'),
-        'version': page.get('version', {}).get('number'),
-        'creator': page.get('history', {}).get('createdBy', {}).get('displayName'),
-        'labels': [label['name'] for label in page.get('metadata', {}).get('labels', {}).get('results', [])],
-        'view_count': page.get('metadata', {}).get('view', {}).get('count', 'N/A')
-    }
+        raise Exception(f"Error fetching page metadata: {response.text}")
+    return response.json()
 
-def fetch_all_descendants(base_url, parent_id, auth):
+def fetch_view_count(base_url, page_id, auth):
+    url = f"{base_url}/wiki/rest/api/analytics/content/{page_id}/views"
     headers = {"Accept": "application/json"}
+    response = requests.get(url, headers=headers, auth=auth)
+    if response.status_code == 200:
+        return response.json().get("count", "N/A")
+    else:
+        print(f"[WARN] View count failed for page {page_id}: {response.status_code}")
+        return "Unavailable"
+
+def fetch_child_pages(base_url, parent_id, auth):
+    headers = {"Accept": "application/json"}
+    url = f"{base_url}/wiki/rest/api/content/{parent_id}/child/page?limit=100&expand=version,metadata.labels,history"
+    response = requests.get(url, headers=headers, auth=auth)
+    if response.status_code != 200:
+        print(f"[WARN] Failed to fetch children of {parent_id}: {response.status_code}")
+        return []
+    return response.json().get("results", [])
+
+def collect_page_data(base_url, root_id, auth):
     all_pages = []
+    queue = [root_id]
 
-    def recurse(page_id):
+    while queue:
+        current_id = queue.pop(0)
         try:
-            analytics = fetch_page_analytics(base_url, page_id, auth)
-            all_pages.append(analytics)
+            page = fetch_page_metadata(base_url, current_id, auth)
+            view_count = fetch_view_count(base_url, current_id, auth)
+            page_info = {
+                'title': page.get('title'),
+                'id': current_id,
+                'last_updated': page.get('version', {}).get('when'),
+                'version': page.get('version', {}).get('number'),
+                'creator': page.get('history', {}).get('createdBy', {}).get('displayName'),
+                'labels': [label['name'] for label in page.get('metadata', {}).get('labels', {}).get('results', [])],
+                'view_count': view_count
+            }
+            all_pages.append(page_info)
+            children = fetch_child_pages(base_url, current_id, auth)
+            queue.extend([child['id'] for child in children])
         except Exception as e:
-            print(f"Skipping page {page_id} due to error: {e}")
-
-        start = 0
-        limit = 50
-        while True:
-            url = f"{base_url}/wiki/rest/api/content/search?cql=parent={page_id}&limit={limit}&start={start}"
-            response = requests.get(url, headers=headers, auth=auth)
-            if response.status_code != 200:
-                print(f"Error fetching children of page {page_id}: {response.text}")
-                break
-            data = response.json()
-            children = data.get('results', [])
-            for child in children:
-                recurse(child['id'])
-            if not data.get('_links', {}).get('next'):
-                break
-            start += limit
-
-    recurse(parent_id)
+            print(f"[ERROR] Skipping page {current_id}: {e}")
     return all_pages
 
 def generate_html_table(page_data):
@@ -65,16 +70,27 @@ def generate_html_table(page_data):
     html += "</table>"
     return html
 
-def post_to_confluence(base_url, space_key, auth, html_content):
-    url = f"{base_url}/wiki/rest/api/content"
-    headers = {
-        "Content-Type": "application/json"
-    }
+def update_confluence_page(base_url, page_id, auth, html_content):
+    # Fetch current version and space key
+    headers = {"Accept": "application/json"}
+    url = f"{base_url}/wiki/rest/api/content/{page_id}?expand=version,space"
+    response = requests.get(url, headers=headers, auth=auth)
+    if response.status_code != 200:
+        raise Exception(f"Error fetching target page version: {response.text}")
+    page = response.json()
+    current_version = page['version']['number']
+    title = page['title']
+    space_key = page['space']['key']
 
+    # Update content
+    update_url = f"{base_url}/wiki/rest/api/content/{page_id}"
+    headers = {"Content-Type": "application/json"}
     data = {
+        "id": page_id,
         "type": "page",
-        "title": "Confluence Page Analytics Report",
+        "title": title,
         "space": {"key": space_key},
+        "version": {"number": current_version + 1},
         "body": {
             "storage": {
                 "value": html_content,
@@ -82,35 +98,28 @@ def post_to_confluence(base_url, space_key, auth, html_content):
             }
         }
     }
-
-    response = requests.post(url, headers=headers, auth=auth, json=data)
+    response = requests.put(update_url, headers=headers, auth=auth, json=data)
     if response.status_code not in [200, 201]:
-        raise Exception(f"Error posting report: {response.text}")
+        raise Exception(f"Error updating report page: {response.text}")
     return response.json()
 
 def lambda_handler(event, context):
     secret_name = os.environ['CONFLUENCE_SECRET_NAME']
-    folder_page_id = os.environ.get('FOLDER_PAGE_ID')
-    target_space_key = os.environ.get('TARGET_SPACE_KEY')
-
-    if not folder_page_id or not target_space_key:
-        return {
-            'statusCode': 400,
-            'body': json.dumps({'error': 'FOLDER_PAGE_ID and TARGET_SPACE_KEY must be set as environment variables'})
-        }
+    root_page_id = os.environ['CONFLUENCE_PAGE_ID']
+    target_page_id = os.environ['TARGET_PAGE_ID']
 
     creds = get_confluence_credentials(secret_name)
     base_url = creds['base_url']
     auth = HTTPBasicAuth(creds['username'], creds['api_token'])
 
-    page_data = fetch_all_descendants(base_url, folder_page_id, auth)
+    page_data = collect_page_data(base_url, root_page_id, auth)
     html_content = generate_html_table(page_data)
-    result = post_to_confluence(base_url, target_space_key, auth, html_content)
+    result = update_confluence_page(base_url, target_page_id, auth, html_content)
 
     return {
         'statusCode': 200,
         'body': json.dumps({
-            'message': 'Analytics report posted successfully',
+            'message': 'Analytics report updated successfully',
             'page_id': result.get('id'),
             'page_url': f"{base_url}/wiki{result.get('_links', {}).get('webui', '')}"
         })
